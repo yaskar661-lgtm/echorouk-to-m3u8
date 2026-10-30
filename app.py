@@ -9,11 +9,13 @@ from urllib.parse import urlparse
 
 app = Flask(__name__)
 
+# Sadece bilinen ve güvenilen altyapı domainleri
 ALLOWED_DOMAINS = [
     "player.dzsecurity.net",
     "hls-distrib-eu0.dzsecurity.net"
 ]
 
+# Kanal tanımları
 CHANNELS_DATA = {
     "echorouktv": {
         "embed_url": "https://player.dzsecurity.net/embed/echorouktv",
@@ -38,6 +40,7 @@ CHANNELS_DATA = {
 }
 
 def fetch_token_for_channel(channel_key):
+    """Tek bir kanal için dzsecurity altyapısından taze linki çeker."""
     channel_info = CHANNELS_DATA[channel_key]
     embed_url = channel_info["embed_url"]
     original_referer = channel_info["referer"]
@@ -114,6 +117,7 @@ def fetch_token_for_channel(channel_key):
         return None
 
 def update_all_tokens():
+    """Tüm kanalların token'larını günceller."""
     print("[*] Kanalların linkleri yenileniyor...")
     for key in CHANNELS_DATA:
         new_url = fetch_token_for_channel(key)
@@ -125,8 +129,10 @@ def update_all_tokens():
         time.sleep(2)
 
 def background_token_updater():
+    """Arka planda her 15 dakikada bir çalışan döngü."""
     print("[*] Arka plan token güncelleyici başlatıldı.")
     update_all_tokens()
+
     while True:
         time.sleep(900)
         update_all_tokens()
@@ -179,6 +185,7 @@ def proxy_master(channel_name):
                 else:
                     full_url = base_url + line
                 
+                # &channel parametresi kaldırılmış temiz proxy linki
                 proxied_url = f"{host_root}/proxy?url={full_url}"
                 new_lines.append(proxied_url)
             else:
@@ -206,7 +213,7 @@ def proxy_media():
     if not is_allowed:
         return redirect(target_url, code=302)
 
-    # Akıllı Referer Bulma
+    # Akıllı Referer Bulma (Otomatik Eşleşme)
     matched_referer = "https://www.echoroukonline.com/"
     for key, data in CHANNELS_DATA.items():
         cached_url = data.get("cached_chunks_url")
@@ -228,12 +235,11 @@ def proxy_media():
 
         content_type = req.headers.get("Content-Type", "application/octet-stream")
 
-        # --- MIME TYPE VE UZANTI DÜZELTME KONTROLÜ ---
+        # MIME Type ve Uzantı Düzeltme (Chrome'un dosya indirmesini engellemek için)
         if target_url.endswith(".ts") or "video/mp2t" in content_type:
             content_type = "video/mp2t"
         elif target_url.endswith(".m4s"):
             content_type = "video/iso.segment"
-        # ---------------------------------------------
 
         if "application/vnd.apple.mpegurl" in content_type or "audio/mpegurl" in content_type or target_url.endswith(".m3u8"):
             playlist_content = req.text
@@ -257,6 +263,7 @@ def proxy_media():
             updated_playlist = "\n".join(new_lines)
             return Response(updated_playlist, mimetype="application/vnd.apple.mpegurl")
 
+        # CPU Optimizasyonu: 128 KB (131072) chunk boyutu
         return Response(req.iter_content(chunk_size=131072), status=req.status_code, mimetype=content_type)
 
     except Exception as e:
