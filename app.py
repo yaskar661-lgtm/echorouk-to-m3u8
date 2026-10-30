@@ -37,6 +37,9 @@ CHANNELS_DATA = {
     },
 }
 
+# CDN bağlantılarını açık tutmak (Keep-Alive) için global session
+global_session = requests.Session()
+
 def fetch_token_for_channel(channel_key):
     channel_info = CHANNELS_DATA[channel_key]
     embed_url = channel_info["embed_url"]
@@ -49,10 +52,7 @@ def fetch_token_for_channel(channel_key):
     }
 
     try:
-        session = requests.Session()
-        session.headers.update(headers)
-
-        resp = session.get(embed_url, timeout=10)
+        resp = global_session.get(embed_url, headers=headers, timeout=10)
         if resp.status_code != 200:
             return None
 
@@ -73,7 +73,7 @@ def fetch_token_for_channel(channel_key):
             "Origin": "https://player.dzsecurity.net",
         }
 
-        challenge_resp = session.post(challenge_url, headers=api_headers, json={}, timeout=10)
+        challenge_resp = global_session.post(challenge_url, headers=api_headers, json={}, timeout=10)
         if challenge_resp.status_code != 200:
             return None
 
@@ -87,10 +87,10 @@ def fetch_token_for_channel(channel_key):
 
         if image_path:
             img_url = f"https://player.dzsecurity.net{image_path}"
-            session.get(img_url, headers={"Referer": embed_url}, timeout=10)
+            global_session.get(img_url, headers={"Referer": embed_url}, timeout=10)
 
         sign_url = f"https://player.dzsecurity.net/api/playback/sign/{channel}"
-        sign_resp = session.post(sign_url, headers=api_headers, json={"nonce": nonce}, timeout=10)
+        sign_resp = global_session.post(sign_url, headers=api_headers, json={"nonce": nonce}, timeout=10)
         
         if sign_resp.status_code != 200:
             return None
@@ -100,7 +100,7 @@ def fetch_token_for_channel(channel_key):
             return None
 
         m3u8_url = sign_payload.get("data", {}).get("url")
-        m3u8_response = requests.get(m3u8_url, headers=headers, timeout=15, allow_redirects=False)
+        m3u8_response = global_session.get(m3u8_url, headers=headers, timeout=15, allow_redirects=False)
         stream_url = m3u8_response.headers.get("Location")
         
         if not stream_url:
@@ -139,30 +139,19 @@ def restart_tokens():
     except Exception as e:
         return f"Yenileme sırasında hata oluştu: {str(e)}", 500
 
-# --- YENİ: DOĞRUDAN CDN YÖNLENDİRME ROUTE'U ---
-@app.route("/redirect/<channel_name>")
-def direct_redirect(channel_name):
-    try:
-        if channel_name not in CHANNELS_DATA:
-            return "Kanal bulunamadı", 404
-
-        channel_info = CHANNELS_DATA[channel_name]
-        chunks_url = channel_info["cached_chunks_url"]
-
-        if not chunks_url:
-            chunks_url = fetch_token_for_channel(channel_name)
-            if chunks_url:
-                channel_info["cached_chunks_url"] = chunks_url
-
-        if not chunks_url:
-            return "Kanal linki henüz hazır değil, lütfen birazdan tekrar deneyin.", 503
-
-        # Sunucu hiç yorulmaz, taze chunks.m3u8 adresine direkt 302 yönlendirmesi yapar
-        return redirect(chunks_url, code=302)
-
-    except Exception as e:
-        return f"Yönlendirme sırasında hata oluştu: {str(e)}", 500
-# ---------------------------------------------
+@app.route("/playlist.m3u8")
+def global_playlist():
+    host_root = request.host_url.rstrip("/")
+    m3u8_content = "#EXTM3U\n"
+    
+    for channel_name in CHANNELS_DATA:
+        m3u8_content += f"#EXTINF:-1,{channel_name.upper()}\n"
+        m3u8_content += f"{host_root}/{channel_name}/master.m3u8\n"
+        
+    response = Response(m3u8_content, mimetype="application/vnd.apple.mpegurl")
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Connection"] = "keep-alive"
+    return response
 
 @app.route("/<channel_name>/master.m3u8")
 def proxy_master(channel_name):
@@ -186,9 +175,10 @@ def proxy_master(channel_name):
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "Referer": referer,
             "Origin": referer.rstrip("/"),
+            "Connection": "keep-alive",
         }
 
-        resp = requests.get(chunks_url, headers=target_headers, timeout=10)
+        resp = global_session.get(chunks_url, headers=target_headers, timeout=15)
         resp.raise_for_status()
 
         playlist_content = resp.text
@@ -214,6 +204,7 @@ def proxy_master(channel_name):
         response = Response(updated_playlist, mimetype="application/vnd.apple.mpegurl")
         response.headers["Access-Control-Allow-Origin"] = "*"
         response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+        response.headers["Connection"] = "keep-alive"
         return response
 
     except Exception as e:
@@ -248,16 +239,18 @@ def proxy_media():
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Referer": matched_referer,
         "Origin": matched_referer.rstrip("/"),
+        "Connection": "keep-alive",
     }
 
     if "Range" in request.headers:
         target_headers["Range"] = request.headers.get("Range")
 
     try:
-        req = requests.get(target_url, headers=target_headers, stream=True, timeout=10)
+        req = global_session.get(target_url, headers=target_headers, stream=True, timeout=15)
         
         content_type = req.headers.get("Content-Type", "application/octet-stream")
 
+        # Live TV 3.2 ve ExoPlayer için katı MIME-type eşleştirmesi
         if target_url.endswith(".ts") or "video/mp2t" in content_type:
             content_type = "video/mp2t"
         elif target_url.endswith(".m4s"):
@@ -286,11 +279,13 @@ def proxy_media():
             
             response = Response(updated_playlist, mimetype="application/vnd.apple.mpegurl")
             response.headers["Access-Control-Allow-Origin"] = "*"
+            response.headers["Connection"] = "keep-alive"
             return response
 
         response = Response(req.iter_content(chunk_size=131072), status=req.status_code, mimetype=content_type)
         response.headers["Access-Control-Allow-Origin"] = "*"
         response.headers["Accept-Ranges"] = "bytes"
+        response.headers["Connection"] = "keep-alive"
         
         if "Content-Range" in req.headers:
             response.headers["Content-Range"] = req.headers.get("Content-Range")
