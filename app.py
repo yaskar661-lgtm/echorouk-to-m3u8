@@ -15,7 +15,7 @@ ALLOWED_DOMAINS = [
     "hls-distrib-eu0.dzsecurity.net"
 ]
 
-# Kanal tanımları (Artık manuel proxy_chunks bayrağına gerek yok)
+# Kanal tanımları
 CHANNELS_DATA = {
     "echorouktv": {
         "embed_url": "https://player.dzsecurity.net/embed/echorouktv",
@@ -55,7 +55,6 @@ def fetch_token_for_channel(channel_key):
         session = requests.Session()
         session.headers.update(headers)
 
-        # 1. Adım: Embed sayfasını al
         resp = session.get(embed_url, timeout=10)
         if resp.status_code != 200:
             return None
@@ -68,7 +67,6 @@ def fetch_token_for_channel(channel_key):
         channel = main_tag.get("data-channel", channel_key)
         embed_grant = main_tag.get("data-embed-grant")
 
-        # 2. Adım: Challenge (Nonce) isteği
         challenge_url = f"https://player.dzsecurity.net/api/playback/challenge/{channel}"
         api_headers = {
             "Content-Type": "application/json",
@@ -90,12 +88,10 @@ def fetch_token_for_channel(channel_key):
         nonce = data.get("nonce")
         image_path = data.get("image_url")
 
-        # 3. Adım: Görseli tetikle
         if image_path:
             img_url = f"https://player.dzsecurity.net{image_path}"
             session.get(img_url, headers={"Referer": embed_url}, timeout=10)
 
-        # 4. Adım: Sign isteği
         sign_url = f"https://player.dzsecurity.net/api/playback/sign/{channel}"
         sign_resp = session.post(sign_url, headers=api_headers, json={"nonce": nonce}, timeout=10)
         
@@ -120,41 +116,35 @@ def fetch_token_for_channel(channel_key):
         print(f"[{channel_key}] Token güncellenirken hata: {e}")
         return None
 
-def background_token_updater():
-    """Arka planda sürekli çalışarak her 15 dakikada bir tüm kanalların linklerini yeniler."""
-    print("[*] Arka plan token güncelleyici başlatıldı.")
-    
+def update_all_tokens():
+    """Tüm kanalların token'larını günceller."""
+    print("[*] Kanalların linkleri yenileniyor...")
     for key in CHANNELS_DATA:
-        print(f"[*] İlk link alınıyor: {key}")
         new_url = fetch_token_for_channel(key)
         if new_url:
             CHANNELS_DATA[key]["cached_chunks_url"] = new_url
-            print(f"[✓] Başarılı: {key}")
+            print(f"[✓] Güncellendi: {key}")
+        else:
+            print(f"[-] Güncellenemedi (eski link korunuyor): {key}")
         time.sleep(2)
+
+def background_token_updater():
+    """Arka planda her 15 dakikada bir çalışan döngü."""
+    print("[*] Arka plan token güncelleyici başlatıldı.")
+    update_all_tokens()
 
     while True:
         time.sleep(900)
-        print("[*] 15 dakika doldu, kanal linkleri arka planda yenileniyor...")
-        
-        for key in CHANNELS_DATA:
-            new_url = fetch_token_for_channel(key)
-            if new_url:
-                CHANNELS_DATA[key]["cached_chunks_url"] = new_url
-                print(f"[✓] Güncellendi: {key}")
-            else:
-                print(f"[-] Güncellenemedi (eski link korunuyor): {key}")
-            time.sleep(2)
+        update_all_tokens()
 
 @app.route("/restart")
 def restart_tokens():
     try:
-        # Arka planda veya anlık olarak yenilemek için fonksiyonu tetikliyoruz
-        # İstek atan tarayıcı çok beklemesin diye ayrı bir thread'de de çalıştırabiliriz
         threading.Thread(target=update_all_tokens, daemon=True).start()
         return "<h3>[✓] Tüm kanal tokenleri ve cache verileri arka planda yenilenmeye başlandı! Sunucu aktif.</h3>", 200
     except Exception as e:
         return f"Yenileme sırasında hata oluştu: {str(e)}", 500
-      
+
 @app.route("/<channel_name>/master.m3u8")
 def proxy_master(channel_name):
     try:
@@ -195,7 +185,8 @@ def proxy_master(channel_name):
                 else:
                     full_url = base_url + line
                 
-                proxied_url = f"{host_root}/proxy?url={full_url}&channel={channel_name}"
+                # --- ARTIK &channel PARAMETRESİ YOK ---
+                proxied_url = f"{host_root}/proxy?url={full_url}"
                 new_lines.append(proxied_url)
             else:
                 new_lines.append(line)
@@ -214,24 +205,30 @@ def proxy_media():
     if not target_url:
         return "URL belirtilmedi", 400
 
-    # --- OTOMATİK GÜVENLİK VE DOMAIN KONTROLÜ ---
     parsed_url = urlparse(target_url)
     target_domain = parsed_url.netloc
     
-    # Gelen URL bizim izin verdiğimiz dzsecurity altyapısından mı?
     is_allowed = any(target_domain == domain or target_domain.endswith("." + domain) for domain in ALLOWED_DOMAINS)
     
     if not is_allowed:
-        # İzin verilmeyen bir domain ise sunucu üzerinden proxylemek yerine
-        # direkt o adrese 302 yönlendirmesi yap (veya güvenlik için engelle)
         return redirect(target_url, code=302)
-    # ---------------------------------------------
 
-    referer = CHANNELS_DATA.get(channel_name, {}).get("referer", "https://www.echoroukonline.com/")
+    # --- AKILLI REFERER BULMA (channel parametresi olmadan tespiti) ---
+    matched_referer = "https://www.echoroukonline.com/" # Varsayılan
+    for key, data in CHANNELS_DATA.items():
+        cached_url = data.get("cached_chunks_url")
+        if cached_url:
+            # Hedef URL, kanalın cached URL kök diziniyle eşleşiyorsa doğru referer'ı kap
+            cached_base = cached_url.rsplit('/', 1)[0]
+            if target_url.startswith(cached_base):
+                matched_referer = data.get("referer")
+                break
+    # ----------------------------------------------------------------
+
     target_headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Referer": referer,
-        "Origin": referer.rstrip("/"),
+        "Referer": matched_referer,
+        "Origin": matched_referer.rstrip("/"),
     }
 
     try:
@@ -254,6 +251,7 @@ def proxy_media():
                     else:
                         segment_full_url = base_url + line
 
+                    # --- ARTIK &channel PARAMETRESİ YOK ---
                     proxied_segment_url = f"{host_root}/proxy?url={segment_full_url}"
                     new_lines.append(proxied_segment_url)
                 else:
