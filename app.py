@@ -210,7 +210,6 @@ def proxy_master(channel_name):
 @app.route("/proxy")
 def proxy_media():
     target_url = request.args.get("url")
-    channel_name = request.args.get("channel", "echorouktv")
     
     if not target_url:
         return "URL belirtilmedi", 400
@@ -255,7 +254,7 @@ def proxy_media():
                     else:
                         segment_full_url = base_url + line
 
-                    proxied_segment_url = f"{host_root}/proxy?url={segment_full_url}&channel={channel_name}"
+                    proxied_segment_url = f"{host_root}/proxy?url={segment_full_url}"
                     new_lines.append(proxied_segment_url)
                 else:
                     new_lines.append(line)
