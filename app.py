@@ -139,6 +139,31 @@ def restart_tokens():
     except Exception as e:
         return f"Yenileme sırasında hata oluştu: {str(e)}", 500
 
+# --- YENİ: DOĞRUDAN CDN YÖNLENDİRME ROUTE'U ---
+@app.route("/redirect/<channel_name>")
+def direct_redirect(channel_name):
+    try:
+        if channel_name not in CHANNELS_DATA:
+            return "Kanal bulunamadı", 404
+
+        channel_info = CHANNELS_DATA[channel_name]
+        chunks_url = channel_info["cached_chunks_url"]
+
+        if not chunks_url:
+            chunks_url = fetch_token_for_channel(channel_name)
+            if chunks_url:
+                channel_info["cached_chunks_url"] = chunks_url
+
+        if not chunks_url:
+            return "Kanal linki henüz hazır değil, lütfen birazdan tekrar deneyin.", 503
+
+        # Sunucu hiç yorulmaz, taze chunks.m3u8 adresine direkt 302 yönlendirmesi yapar
+        return redirect(chunks_url, code=302)
+
+    except Exception as e:
+        return f"Yönlendirme sırasında hata oluştu: {str(e)}", 500
+# ---------------------------------------------
+
 @app.route("/<channel_name>/master.m3u8")
 def proxy_master(channel_name):
     try:
@@ -186,7 +211,6 @@ def proxy_master(channel_name):
 
         updated_playlist = "\n".join(new_lines)
         
-        # CORS başlıkları ile yanıt döndürülüyor (VLC ve Tarayıcılar için kritik)
         response = Response(updated_playlist, mimetype="application/vnd.apple.mpegurl")
         response.headers["Access-Control-Allow-Origin"] = "*"
         response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
@@ -226,7 +250,6 @@ def proxy_media():
         "Origin": matched_referer.rstrip("/"),
     }
 
-    # VLC ve oynatıcıların gönderdiği Range (parça) isteğini CDN'e iletmek için yakalıyoruz
     if "Range" in request.headers:
         target_headers["Range"] = request.headers.get("Range")
 
@@ -265,7 +288,6 @@ def proxy_media():
             response.headers["Access-Control-Allow-Origin"] = "*"
             return response
 
-        # Stream yanıtına CORS ve Range uyumlu başlıklar ekleniyor
         response = Response(req.iter_content(chunk_size=131072), status=req.status_code, mimetype=content_type)
         response.headers["Access-Control-Allow-Origin"] = "*"
         response.headers["Accept-Ranges"] = "bytes"
