@@ -194,7 +194,12 @@ def proxy_master(channel_name):
                 else:
                     full_url = base_url + line
                 
-                proxied_url = f"{host_root}/proxy?url={full_url}"
+                # Parça adını (örn: l_xxx.ts) ayıkla ve temiz URL formatına dönüştür
+                parsed_ts = urlparse(full_url)
+                ts_filename = parsed_ts.path.split("/")[-1]
+                
+                # Temiz yol: /<channel_name>/<segment_name>.ts
+                proxied_url = f"{host_root}/{channel_name}/{ts_filename}"
                 new_lines.append(proxied_url)
             else:
                 new_lines.append(line)
@@ -211,34 +216,26 @@ def proxy_master(channel_name):
         return f"Playlist alınırken hata oluştu: {str(e)}", 500
 
 
-@app.route("/proxy")
-def proxy_media():
-    target_url = request.args.get("url")
-    
-    if not target_url:
-        return "URL belirtilmedi", 400
+@app.route("/<channel_name>/<path:subpath>")
+def proxy_segment(channel_name, subpath):
+    if channel_name not in CHANNELS_DATA:
+        return "Kanal bulunamadı", 404
 
-    parsed_url = urlparse(target_url)
-    target_domain = parsed_url.netloc
-    
-    is_allowed = any(target_domain == domain or target_domain.endswith("." + domain) for domain in ALLOWED_DOMAINS)
-    
-    if not is_allowed:
-        return redirect(target_url, code=302)
+    channel_info = CHANNELS_DATA[channel_name]
+    cached_url = channel_info.get("cached_chunks_url")
+    referer = channel_info.get("referer")
 
-    matched_referer = "https://www.echoroukonline.com/"
-    for key, data in CHANNELS_DATA.items():
-        cached_url = data.get("cached_chunks_url")
-        if cached_url:
-            cached_base = cached_url.rsplit('/', 1)[0]
-            if target_url.startswith(cached_base):
-                matched_referer = data.get("referer")
-                break
+    if not cached_url:
+        return "Token hazır değil", 503
+
+    # CDN temel kök dizinini al (örn: https://.../hls/elhayattv)
+    base_cdn_root = cached_url.rsplit('/', 1)[0]
+    target_url = f"{base_cdn_root}/{subpath}"
 
     target_headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Referer": matched_referer,
-        "Origin": matched_referer.rstrip("/"),
+        "Referer": referer,
+        "Origin": referer.rstrip("/"),
         "Connection": "keep-alive",
     }
 
@@ -255,32 +252,6 @@ def proxy_media():
             content_type = "video/mp2t"
         elif target_url.endswith(".m4s"):
             content_type = "video/iso.segment"
-
-        if "application/vnd.apple.mpegurl" in content_type or "audio/mpegurl" in content_type or target_url.endswith(".m3u8"):
-            playlist_content = req.text
-            base_url = re.sub(r"[^/]+$", "", target_url)
-            host_root = request.host_url.rstrip("/")
-
-            new_lines = []
-            for line in playlist_content.splitlines():
-                line = line.strip()
-                if line and not line.startswith("#"):
-                    if line.startswith("http://") or line.startswith("https://"):
-                        segment_full_url = line
-                    else:
-                        segment_full_url = base_url + line
-
-                    proxied_segment_url = f"{host_root}/proxy?url={segment_full_url}"
-                    new_lines.append(proxied_segment_url)
-                else:
-                    new_lines.append(line)
-
-            updated_playlist = "\n".join(new_lines)
-            
-            response = Response(updated_playlist, mimetype="application/vnd.apple.mpegurl")
-            response.headers["Access-Control-Allow-Origin"] = "*"
-            response.headers["Connection"] = "keep-alive"
-            return response
 
         response = Response(req.iter_content(chunk_size=131072), status=req.status_code, mimetype=content_type)
         response.headers["Access-Control-Allow-Origin"] = "*"
